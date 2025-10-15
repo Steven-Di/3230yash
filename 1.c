@@ -9,9 +9,11 @@ int main() {
     char *fields[31]; // assuming a maximum of 30 fields + 1 for NULL
     int field_count;
 
+    printf("## 3230yash >> ");
+
     // read multiple lines from stdin
     while (fgets(line, sizeof(line), stdin)) {
-
+        
         // field processing and storage
         line[strcspn(line, "\n")] = '\0';
         field_count = 0;
@@ -26,13 +28,24 @@ int main() {
             }
         }
         
-        // output the whole line
-        for (int i = 0; i < field_count; i++) {
-            printf("%s ", fields[i]);
+        // execute command
+        if (field_count > 0) {
+            fields[field_count] = NULL; // NULL-terminate the array
+            pid_t pid = fork();
+            if (pid == 0) {
+                // child process
+                execvp(fields[0], fields);
+                perror("execvp failed");
+                exit(1);
+            } else if (pid > 0) {
+                // parent process
+                int status;
+                waitpid(pid, &status, 0);
+            } else {
+                perror("fork failed");
+            }
         }
-        printf("\n");
-        
+        printf("## 3230yash >> ");
     }
-
     return 0;
 }

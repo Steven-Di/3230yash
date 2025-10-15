@@ -1,3 +1,4 @@
-hello   world  this    is  c
-foo bar baz     
-   leading spaces   are ok
+echo 1
+echo  2
+echo   3
+echo    4
