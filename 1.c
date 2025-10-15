@@ -3,6 +3,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <errno.h>
 
 int main() {
     char line[1024];
@@ -35,7 +36,7 @@ int main() {
             if (pid == 0) {
                 // child process
                 execvp(fields[0], fields);
-                perror("execvp failed");
+                fprintf(stderr, "3230yash: \'%s\': %s\n", fields[0], strerror(errno));
                 exit(1);
             } else if (pid > 0) {
                 // parent process
