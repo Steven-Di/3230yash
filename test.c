@@ -1,220 +1,118 @@
-/*******************************************************
- * 3230yash – COMP3230 Programming Assignment 1
- * 作者：Your Name  UID：YourUID
- * 开发平台：Ubuntu 20.04 / WSL2 / workbench2
- * 完成度：全部功能已完整实现（含管道、watch、SIGINT、僵尸回收等）
- * 备注：如使用 GenAI 辅助，请在报告里如实说明。
- ******************************************************/
-#define _GNU_SOURCE
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <errno.h>
-#include <sys/types.h>
 #include <sys/wait.h>
-#include <signal.h>
-#include <fcntl.h>
-#include <time.h>
-#include <dirent.h>
-#include <sys/stat.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <errno.h>
 
-#define MAX_LINE 1024
-#define MAX_ARGS 30
-#define MAX_PIPES 4
-#define MAX_CMDS (MAX_PIPES+1)
+#define MAX_FIELDS   30
+#define MAX_LINE_LENGTH 1024
+#define MAX_PIPES    4
+#define MAX_CMDS     (MAX_PIPES + 1)
 
-static pid_t fg_child = 0;          /* 当前前台子进程，用于 SIGINT 传递 */
-static volatile sig_atomic_t sigint_flag = 0;
+typedef struct {
+    char *argv[MAX_FIELDS + 1];   /* 以 NULL 结尾 */
+    int  argc;
+} cmd_t;
 
-/* 信号处理：只设置标志，主循环里再处理 */
-static void sigint_handler(int sig) {
-    (void)sig;
-    sigint_flag = 1;
-    if (fg_child > 0) {
-        kill(-fg_child, SIGINT);   /* 发给整个前台进程组 */
+/* 先按 | 分段，再按空格分 token；返回命令个数，-1 表示语法错误 */
+static int parse_line(char *line, cmd_t cmds[])
+{
+    int cmd_cnt = 0;
+    char *saveptr1 = NULL, *saveptr2 = NULL;
+
+    /* 按 | 拆分 */
+    for (char *seg = strtok_r(line, "|", &saveptr1);
+         seg;
+         seg = strtok_r(NULL, "|", &saveptr1))
+    {
+        if (cmd_cnt >= MAX_CMDS) {
+            fprintf(stderr, "3230yash: too many commands in pipe\n");
+            return -1;
+        }
+
+        /* 去掉前后空格 */
+        while (*seg == ' ' || *seg == '\t') ++seg;
+        char *tail = seg + strlen(seg) - 1;
+        while (tail > seg && (*tail == ' ' || *tail == '\t')) *tail-- = '\0';
+
+        if (*seg == '\0') {          /* 空命令，如 cat | | wc */
+            fprintf(stderr, "3230yash: should not have two consecutive | without in-between command\n");
+            return -1;
+        }
+
+        /* 按空格拆 argv */
+        int argc = 0;
+        for (char *tok = strtok_r(seg, " \t", &saveptr2);
+             tok;
+             tok = strtok_r(NULL, " \t", &saveptr2))
+        {
+            if (argc >= MAX_FIELDS) {
+                fprintf(stderr, "3230yash: too many arguments\n");
+                return -1;
+            }
+            cmds[cmd_cnt].argv[argc++] = tok;
+        }
+        cmds[cmd_cnt].argv[argc] = NULL;
+        cmds[cmd_cnt].argc       = argc;
+        ++cmd_cnt;
     }
+
+    /* 边界检查：| 开头或结尾 */
+    if (line[0] == '|' || line[strlen(line)-1] == '|') {
+        fprintf(stderr, "3230yash: Incorrect pipe sequence\n");
+        return -1;
+    }
+
+    return cmd_cnt;
 }
 
-/* 安装 SIGINT 处理 */
-static void setup_sigint(void) {
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = sigint_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;
-    sigaction(SIGINT, &sa, NULL);
-}
+int main(void)
+{
+    char line[MAX_LINE_LENGTH];
+    cmd_t cmds[MAX_CMDS];
 
-/* 打印提示符 */
-static void prompt(void) {
     printf("## 3230yash >> ");
-    fflush(stdout);
-}
+    while (fgets(line, sizeof(line), stdin)) {
+        line[strcspn(line, "\n")] = '\0';
 
-/* 去掉行尾 \n */
-static void trim_line(char *s) {
-    s[strcspn(s, "\r\n")] = 0;
-}
-
-/* 分割字符串为 argv，返回 argc */
-static int split_args(char *line, char **argv, int max) {
-    int cnt = 0;
-    char *tok = strtok(line, " \t");
-    while (tok && cnt < max - 1) {
-        argv[cnt++] = tok;
-        tok = strtok(NULL, " \t");
-    }
-    argv[cnt] = NULL;
-    return cnt;
-}
-
-/* 在 $PATH 中查找可执行文件，成功返回 malloc 的路径，失败返回 NULL */
-static char *search_path(const char *cmd) {
-    if (strchr(cmd, '/')) return NULL; /* 含 / 的不搜索 PATH */
-    char *path_env = getenv("PATH");
-    if (!path_env) return NULL;
-    char *path_env_copy = strdup(path_env);
-    char *dir = strtok(path_env_copy, ":");
-    static char buf[PATH_MAX];
-    while (dir) {
-        snprintf(buf, sizeof(buf), "%s/%s", dir, cmd);
-        if (access(buf, X_OK) == 0) {
-            free(path_env_copy);
-            return strdup(buf);
+        int cmd_cnt = parse_line(line, cmds);
+        if (cmd_cnt == -1) {          /* 语法错误，已打印提示 */
+            printf("## 3230yash >> ");
+            continue;
         }
-        dir = strtok(NULL, ":");
-    }
-    free(path_env_copy);
-    return NULL;
-}
-
-/* 执行外部命令，支持绝对/相对/PATH 搜索 */
-static void exec_cmd(char **argv) {
-    if (strchr(argv[0], '/')) {
-        /* 绝对或相对路径 */
-        execv(argv[0], argv);
-    } else {
-        /* PATH 搜索 */
-        char *full = search_path(argv[0]);
-        if (full) {
-            execv(full, argv);
-            free(full);
+        if (cmd_cnt == 0) {           /* 空行 */
+            printf("## 3230yash >> ");
+            continue;
         }
-    }
-    /* 到这里说明 exec 失败 */
-    fprintf(stderr, "3230yash: '%s': %s\n", argv[0], strerror(errno));
-    exit(EXIT_FAILURE);
-}
 
-/* 从 /proc/{pid}/stat 读取字段，返回是否成功 */
-static int read_stat_fields(pid_t pid,
-                            char *state,
-                            int *cpuid,
-                            unsigned long *utime,
-                            unsigned long *stime,
-                            unsigned long *vsize,
-                            unsigned long *minflt,
-                            unsigned long *majflt) {
-    char path[64];
-    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
-    FILE *f = fopen(path, "r");
-    if (!f) return 0;
-    /* 读第一行 */
-    char line[1024];
-    if (!fgets(line, sizeof(line), f)) { fclose(f); return 0; }
-    fclose(f);
-    /* 跳过命令名（可能含空格） */
-    char *p = strrchr(line, ')');
-    if (!p) return 0;
-    p += 2; /* 跳过 ") " */
-    /* 开始解析 */
-    int ret = sscanf(p,
-        "%c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu %*d %*d %d %*d %*u %lu %*u %lu %lu",
-        state, utime, stime, cpuid, vsize, minflt, majflt);
-    return ret == 7;
-}
-
-/* 打印一条统计行 */
-static void print_snapshot(const char *tag, pid_t pid) {
-    char state;
-    int cpuid;
-    unsigned long ut, st, vsz, minf, majf;
-    if (!read_stat_fields(pid, &state, &cpuid, &ut, &st, &vsz, &minf, &majf))
-        return;
-    printf("%-6s %c %3d %6.2f %6.2f %8lu %6lu %6lu\n",
-           tag, state, cpuid,
-           (double)ut / sysconf(_SC_CLK_TCK),
-           (double)st / sysconf(_SC_CLK_TCK),
-           vsz, minf, majf);
-}
-
-/* watch 命令：监控单条外部命令的资源 */
-static void cmd_watch(char **argv) {
-    if (!argv[1]) {
-        fprintf(stderr, "3230yash: watch 用法: watch <命令>\n");
-        return;
-    }
-    /* 找到真正要执行的命令 */
-    char *real_argv[MAX_ARGS];
-    int j = 0;
-    for (int i = 1; argv[i]; i++) real_argv[j++] = argv[i];
-    real_argv[j] = NULL;
-
-    pid_t pid = fork();
-    if (pid < 0) { perror("fork"); return; }
-    if (pid == 0) {
-        /* 子进程：执行命令 */
-        exec_cmd(real_argv);
-    }
-    /* 父进程：监控 */
-    printf("STATE  CPUID  UTIME  STIME    VSIZE MINFLT MAJFLT\n");
-    /* 初始快照 */
-    usleep(10000); /* 稍等，让子进程进入内核 */
-    print_snapshot("START", pid);
-    struct timespec ts = {0, 500000000L}; /* 500ms */
-    while (1) {
-        nanosleep(&ts, NULL);
-        /* 非阻塞检查子进程是否结束 */
-        siginfo_t infop;
-        int r = waitid(P_PID, pid, &infop, WEXITED | WNOHANG | WNOWAIT);
-        if (r == 0 && infop.si_pid == pid) break;
-        print_snapshot("RUN", pid);
-    }
-    /* 收尸并打印结束信息 */
-    int status;
-    waitpid(pid, &status, 0);
-    print_snapshot("END", pid);
-    if (WIFSIGNALED(status)) {
-        const char *signame = NULL;
-        switch (WTERMSIG(status)) {
-            case SIGINT: signame = "Interrupt"; break;
-            case SIGKILL: signame = "Killed"; break;
-            default: signame = strsignal(WTERMSIG(status)); break;
+        /* 如果检测到 pipe，仅打印提示，不执行 */
+        if (cmd_cnt > 1) {
+            printf("[INFO] detected %d commands in pipe (not executed yet)\n", cmd_cnt);
+            for (int i = 0; i < cmd_cnt; ++i) {
+                printf("  cmd[%d]: ", i);
+                for (int j = 0; cmds[i].argv[j]; ++j)
+                    printf("%s ", cmds[i].argv[j]);
+                putchar('\n');
+            }
+            printf("## 3230yash >> ");
+            continue;
         }
-        printf("%s: %s\n", real_argv[0], signame);
-    }
-}
 
-/* 处理单条命令（无管道情况）*/
-static void run_simple(char **argv) {
-    pid_t pid = fork();
-    if (pid < 0) { perror("fork"); return; }
-    if (pid == 0) {
-        /* 子进程 */
-        exec_cmd(argv);
-    }
-    fg_child = pid;
-    int status;
-    waitpid(pid, &status, 0);
-    fg_child = 0;
-    if (WIFSIGNALED(status)) {
-        const char *signame = NULL;
-        switch (WTERMSIG(status)) {
-            case SIGINT: signame = "Interrupt"; break;
-            case SIGKILL: signame = "Killed"; break;
-            default: signame = strsignal(WTERMSIG(status)); break;
+        /* 单命令：沿用你原来的逻辑 */
+        pid_t pid = fork();
+        if (pid == 0) {
+            execvp(cmds[0].argv[0], cmds[0].argv);
+            fprintf(stderr, "3230yash: '%s': %s\n", cmds[0].argv[0], strerror(errno));
+            exit(1);
+        } else if (pid > 0) {
+            int status;
+            waitpid(pid, &status, 0);
+        } else {
+            perror("fork failed");
         }
-        printf("%s: %s\n", argv[0], signame);
+
+        printf("## 3230yash >> ");
     }
+    return 0;
 }
