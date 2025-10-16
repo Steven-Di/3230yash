@@ -1,14 +1,19 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <signal.h>
 
 #define MAX_FIELDS   30
 #define MAX_LINE_LENGTH 1024
 #define MAX_PIPES    4
 #define MAX_CMDS     (MAX_PIPES + 1)
+
+static volatile sig_atomic_t got_sigint = 0;   /* 原子标志 */
+static void sigint_handler(int sig) { (void)sig; got_sigint = 1; }
 
 typedef struct {
     char *argv[MAX_FIELDS + 1];   /* 以 NULL 结尾 */
@@ -54,7 +59,7 @@ static int parse_line(char *line, cmd_t cmds[])
             cmds[cmd_cnt].argv[argc++] = tok;
         }
         cmds[cmd_cnt].argv[argc] = NULL;
-        cmds[cmd_cnt].argc       = argc;
+        cmds[cmd_cnt].argc = argc;
         ++cmd_cnt;
     }
 
@@ -69,37 +74,54 @@ static int parse_line(char *line, cmd_t cmds[])
 
 int main(void)
 {
+    /* ---------- 1. 注册 handler ---------- */
+    struct sigaction sa;
+    sa.sa_handler = sigint_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;                 /* 不设置 SA_RESTART！ */
+    sigaction(SIGINT, &sa, NULL);
+
     char line[MAX_LINE_LENGTH];
     cmd_t cmds[MAX_CMDS];
 
     printf("## 3230yash >> ");
-    while (fgets(line, sizeof(line), stdin)) {
-        line[strcspn(line, "\n")] = '\0';
-
-        int cmd_cnt = parse_line(line, cmds);
-        if (cmd_cnt == -1) {          /* 语法错误，已打印提示 */
-            printf("## 3230yash >> ");
-            continue;
-        }
-        if (cmd_cnt == 0) {           /* 空行 */
-            printf("## 3230yash >> ");
-            continue;
-        }
-
-        /* 如果检测到 pipe，仅打印提示，不执行 */
-        if (cmd_cnt > 1) {
-            printf("[INFO] detected %d commands in pipe (not executed yet)\n", cmd_cnt);
-            for (int i = 0; i < cmd_cnt; ++i) {
-                printf("  cmd[%d]: ", i);
-                for (int j = 0; cmds[i].argv[j]; ++j)
-                    printf("%s ", cmds[i].argv[j]);
-                putchar('\n');
+    fflush(stdout); 
+    while (1) {
+        // read line and handle Ctrl-C
+        if (fgets(line, sizeof(line), stdin) == NULL) {
+            if (got_sigint) {               /* 是 Ctrl-C 导致的 */
+                got_sigint = 0;             /* 清标志 */
+                clearerr(stdin);            /* 清 stdin 错误状态 */
+                printf("\n## 3230yash >> ");
+                fflush(stdout);
+                continue;                   /* 立即重新提示 */
             }
-            printf("## 3230yash >> ");
-            continue;
+            break;                          /* 真 EOF (Ctrl-D) */
         }
 
-        /* 单命令：沿用你原来的逻辑 */
+        // parse line
+        line[strcspn(line, "\n")] = '\0';
+        int cmd_cnt = parse_line(line, cmds);
+
+        // start executing commands
+        for (int i = 0; i < cmd_cnt; ++i) {
+            if (strcmp(cmds[i].argv[0], "exit") == 0){
+                //execute builtin exit
+                if (cmds[0].argv[1]) {          /* 后面还有参数 */
+                    printf("3230yash: \"exit\" with other arguments!!!\n");
+                } else {                        /* 干净退出 */
+                    printf("3230yash: Terminated\n");
+                    exit(0);
+                }
+            } else if (strcmp(cmds[i].argv[0], "watch") == 0){
+                //execute builtin watch
+            } else {
+                //other commands
+            }
+        }
+        
+        /* single command
+
         pid_t pid = fork();
         if (pid == 0) {
             execvp(cmds[0].argv[0], cmds[0].argv);
@@ -111,8 +133,10 @@ int main(void)
         } else {
             perror("fork failed");
         }
+        */
 
         printf("## 3230yash >> ");
+        fflush(stdout); 
     }
     return 0;
 }
