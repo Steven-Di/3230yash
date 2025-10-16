@@ -187,8 +187,17 @@ int main(void)
             for (int i = 0; i < cmd_cnt; ++i)
             {
                 int status;
-                waitpid(pid[i], &status, 0);
-                if (WIFSIGNALED(status))
+                pid_t w;
+                do
+                {
+                    w = waitpid(pid[i], &status, 0);
+                } while (w == -1 && errno == EINTR);
+
+                if (w == -1)
+                {
+                    perror("waitpid");
+                }
+                else if (WIFSIGNALED(status))
                 {
                     const char *sig =
                         WTERMSIG(status) == SIGINT ? "Interrupt" : WTERMSIG(status) == SIGKILL ? "Killed"
@@ -221,19 +230,35 @@ int main(void)
             }
             else
             {
-
                 // 单条正常命令，直接执行
                 pid_t pid = fork();
                 if (pid == 0)
                 {
+                    signal(SIGINT, SIG_DFL);
                     execvp(cmds[0].argv[0], cmds[0].argv);
                     fprintf(stderr, "3230yash: '%s': %s\n", cmds[0].argv[0], strerror(errno));
-                    exit(EXIT_FAILURE);
+                    _exit(127);
                 }
                 else if (pid > 0)
                 {
                     int status;
-                    waitpid(pid, &status, 0);
+                    pid_t w;
+                    do
+                    {
+                        w = waitpid(pid, &status, 0);
+                    } while (w == -1 && errno == EINTR);
+
+                    if (w == -1)
+                    {
+                        perror("waitpid");
+                    }
+                    else if (WIFSIGNALED(status))
+                    {
+                        int sig = WTERMSIG(status);
+                        printf("%s: %s\n", cmds[0].argv[0],
+                               sig == SIGINT ? "Interrupt" : sig == SIGKILL ? "Killed"
+                                                                            : "Killed");
+                    }
                 }
                 else
                 {
