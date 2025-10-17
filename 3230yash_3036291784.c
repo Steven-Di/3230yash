@@ -1,8 +1,8 @@
 /**********************************************************
-* Student Name and No.: Di Kaitian 3036291784
-* Development platform: WSL2 Ubuntu connected to VSCode
-* Remark: Complete all features as required
-************************************************************/
+ * Student Name and No.: Di Kaitian 3036291784
+ * Development platform: WSL2 Ubuntu connected to VSCode
+ * Remark: Complete all features as required
+ ************************************************************/
 
 // see git commit history on web: https://github.com/Steven-Di/3230yash.git
 #include <stdio.h>
@@ -39,8 +39,17 @@ typedef struct
 // parse functing: parse every line into cmds array, return command count, or -1 on error
 static int parse_line(char *line, cmd_t cmds[])
 {
+
     int cmd_cnt = 0;                         // command count
     char *saveptr1 = NULL, *saveptr2 = NULL; // for strtok_r
+
+    // check invalid '||' sequence in advance
+    for (char *p = line; *p; ++p)
+        if (*p == '|' && *(p + 1) == '|')
+        {
+            fprintf(stderr, "3230yash: should not have two consecutive | without in-between command\n");
+            return -1;
+        }
 
     // check invalid pipe sequence
     if (line[0] == '|' || line[strlen(line) - 1] == '|')
@@ -54,10 +63,11 @@ static int parse_line(char *line, cmd_t cmds[])
          seg;
          seg = strtok_r(NULL, "|", &saveptr1))
     {
+
         // exceed max commands
         if (cmd_cnt >= MAX_CMDS)
         {
-            fprintf(stderr, "3230yash: too many commands in pipe\n");
+            fprintf(stderr, "3230yash: Too many commands in pipe\n");
             return -1;
         }
 
@@ -84,7 +94,7 @@ static int parse_line(char *line, cmd_t cmds[])
             // exceed max fields
             if (argc >= MAX_FIELDS)
             {
-                fprintf(stderr, "3230yash: too many arguments\n");
+                fprintf(stderr, "3230yash: Too many arguments\n");
                 return -1;
             }
             cmds[cmd_cnt].argv[argc++] = tok;
@@ -152,7 +162,7 @@ int main(void)
             {
 
                 // handle multiple commands with pipes
-                
+
                 // this part creates pipes, forks and execs each command, connects pipes accordingly.
                 // parent process waits for all child processes to finish and reports if any terminated by signal
 
