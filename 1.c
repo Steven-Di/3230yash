@@ -7,6 +7,8 @@
 #include <errno.h>
 #include <signal.h>
 #include <string.h>
+#include <fcntl.h>    // open, O_RDONLY
+#include <sys/stat.h> // 可选，但 fcntl.h 已足够
 
 #define MAX_FIELDS 30
 #define MAX_LINE_LENGTH 1024
@@ -126,82 +128,90 @@ int main(void)
         // 区分一行或多行
         if (cmd_cnt > 1)
         {
-            // 多条命令，处理 pipe
-            int pipefd[MAX_PIPES][2]; /* 最多 4 条管道 */
-            pid_t pid[MAX_CMDS];
-
-            /* 1. 提前创建所有管道 */
-            for (int i = 0; i < cmd_cnt - 1; ++i)
+            if (strcmp(cmds[0].argv[0], "watch") == 0)
             {
-                if (pipe(pipefd[i]) < 0)
-                {
-                    perror("pipe");
-                    exit(1);
-                }
+                fprintf(stderr, "3230yash: Cannot watch a pipe sequence\n");
             }
-
-            /* 2. 逐个 fork + exec */
-            for (int i = 0; i < cmd_cnt; ++i)
+            else
             {
-                pid[i] = fork();
-                if (pid[i] == 0)
-                { /* 子进程 */
-                    /* 恢复默认 SIGINT */
-                    signal(SIGINT, SIG_DFL);
 
-                    /* 重定向 stdin（除了第一个） */
-                    if (i > 0)
+                // 多条命令，处理 pipe
+                int pipefd[MAX_PIPES][2]; /* 最多 4 条管道 */
+                pid_t pid[MAX_CMDS];
+
+                /* 1. 提前创建所有管道 */
+                for (int i = 0; i < cmd_cnt - 1; ++i)
+                {
+                    if (pipe(pipefd[i]) < 0)
                     {
-                        dup2(pipefd[i - 1][0], STDIN_FILENO);
+                        perror("pipe");
+                        exit(1);
                     }
-                    /* 重定向 stdout（除了最后一个） */
-                    if (i < cmd_cnt - 1)
+                }
+
+                /* 2. 逐个 fork + exec */
+                for (int i = 0; i < cmd_cnt; ++i)
+                {
+                    pid[i] = fork();
+                    if (pid[i] == 0)
+                    { /* 子进程 */
+                        /* 恢复默认 SIGINT */
+                        signal(SIGINT, SIG_DFL);
+
+                        /* 重定向 stdin（除了第一个） */
+                        if (i > 0)
+                        {
+                            dup2(pipefd[i - 1][0], STDIN_FILENO);
+                        }
+                        /* 重定向 stdout（除了最后一个） */
+                        if (i < cmd_cnt - 1)
+                        {
+                            dup2(pipefd[i][1], STDOUT_FILENO);
+                        }
+                        /* 关闭所有管道 fd */
+                        for (int j = 0; j < cmd_cnt - 1; ++j)
+                        {
+                            close(pipefd[j][0]);
+                            close(pipefd[j][1]);
+                        }
+                        /* 执行命令 */
+                        execvp(cmds[i].argv[0], cmds[i].argv);
+                        fprintf(stderr, "3230yash: Fail to execute '%s': %s\n", cmds[i].argv[0], strerror(errno));
+                        exit(1);
+                    }
+                    else if (pid[i] < 0)
                     {
-                        dup2(pipefd[i][1], STDOUT_FILENO);
+                        perror("fork");
+                        exit(1);
                     }
-                    /* 关闭所有管道 fd */
-                    for (int j = 0; j < cmd_cnt - 1; ++j)
+                }
+
+                /* 3. 父进程关闭所有管道 fd */
+                for (int i = 0; i < cmd_cnt - 1; ++i)
+                {
+                    close(pipefd[i][0]);
+                    close(pipefd[i][1]);
+                }
+
+                /* 4. 等待所有子进程，打印信号名 */
+                for (int i = 0; i < cmd_cnt; ++i)
+                {
+                    int status;
+                    pid_t w;
+                    do
                     {
-                        close(pipefd[j][0]);
-                        close(pipefd[j][1]);
+                        w = waitpid(pid[i], &status, 0);
+                    } while (w == -1 && errno == EINTR);
+
+                    if (w == -1)
+                    {
+                        perror("waitpid");
                     }
-                    /* 执行命令 */
-                    execvp(cmds[i].argv[0], cmds[i].argv);
-                    fprintf(stderr, "3230yash: Fail to execute '%s': %s\n", cmds[i].argv[0], strerror(errno));
-                    exit(1);
-                }
-                else if (pid[i] < 0)
-                {
-                    perror("fork");
-                    exit(1);
-                }
-            }
-
-            /* 3. 父进程关闭所有管道 fd */
-            for (int i = 0; i < cmd_cnt - 1; ++i)
-            {
-                close(pipefd[i][0]);
-                close(pipefd[i][1]);
-            }
-
-            /* 4. 等待所有子进程，打印信号名 */
-            for (int i = 0; i < cmd_cnt; ++i)
-            {
-                int status;
-                pid_t w;
-                do
-                {
-                    w = waitpid(pid[i], &status, 0);
-                } while (w == -1 && errno == EINTR);
-
-                if (w == -1)
-                {
-                    perror("waitpid");
-                }
-                else if (WIFSIGNALED(status))
-                {
-                    int sig = WTERMSIG(status);
-                    printf("%s: %s: %d\n", cmds[0].argv[0], strsignal(sig), sig);
+                    else if (WIFSIGNALED(status))
+                    {
+                        int sig = WTERMSIG(status);
+                        printf("%s: %s: %d\n", cmds[0].argv[0], strsignal(sig), sig);
+                    }
                 }
             }
         }
@@ -226,6 +236,73 @@ int main(void)
             {
 
                 // 内置 watch 命令
+                if (cmds[0].argc < 2)
+                {
+                    printf("3230yash: \"watch\" cannot be a standalone command\n");
+                    printf("##3230yash >> ");
+                    continue;
+                }
+
+                /* 1. 先打印表头（题目要求） */
+                printf("STATE  CPUID UTIME STIME VSIZE   MINFLT MAJFLT\n");
+
+                /* 2. fork 子进程去跑目标命令 */
+                pid_t wpid = fork();
+                if (wpid == 0)
+                {
+                    signal(SIGINT, SIG_DFL);
+                    execvp(cmds[0].argv[1], cmds[0].argv + 1);
+                    _exit(127); /* exec 失败也不打印，留给父进程 */
+                }
+                else if (wpid < 0)
+                {
+                    perror("fork");
+                    continue;
+                }
+
+                /* 3. 每 500 ms 采样 /proc/pid/stat 直到子进程结束 */
+                char stat_path[32];
+                snprintf(stat_path, sizeof(stat_path), "/proc/%d/stat", (int)wpid);
+
+                while (1)
+                {
+                    int status;
+                    if (waitpid(wpid, &status, WNOHANG) == wpid)
+                        break; /* 子进程已结束 */
+
+                    int fd = open(stat_path, O_RDONLY);
+                    if (fd < 0)
+                        break; /* 进程已消失 */
+                    char buf[512] = {0};
+                    read(fd, buf, sizeof(buf) - 1);
+                    close(fd);
+
+                    char state;
+                    int cpu;
+                    unsigned int utime, stime, vsize, minflt, majflt;
+
+                    sscanf(buf, "%*d %*s %c %d %*d %*d %*d %*d %*u %*u %*u %*u %*u %u %u %*d %*d %u %*u %*u %*d %*u %*u %*u %*u %*u %*u %*u %*u %*u %u %u",
+                           &state, &cpu, &utime, &stime, &vsize, &minflt, &majflt);
+
+                    /* 题目格式：STATE CPUID UTIME STIME VSIZE MINFLT MAJFLT */
+                    printf("%c %d %.2f %.2f %u %d %d\n",
+                           state, cpu,
+                           (double)utime / 100.0, /* 滴答→秒 */
+                           (double)stime / 100.0,
+                           vsize, minflt, majflt);
+
+                    usleep(500000); /* 500 ms */
+                }
+
+                /* 4. 子进程已结束，再采一次“结束后”快照（题目要求） */
+                int status;
+                waitpid(wpid, &status, 0); /* 收尸 */
+                if (WIFSIGNALED(status))
+                {
+                    int sig = WTERMSIG(status);
+                    printf("%s:%s:%d\n", cmds[0].argv[1],
+                           sig == SIGINT ? "interrupt" : "killed", sig);
+                }
             }
             else
             {
