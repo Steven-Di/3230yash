@@ -8,7 +8,6 @@
 #include <signal.h>
 #include <string.h>
 #include <fcntl.h>    // open, O_RDONLY
-#include <sys/stat.h> // 可选，但 fcntl.h 已足够
 
 #define MAX_FIELDS 30
 #define MAX_LINE_LENGTH 1024
@@ -210,7 +209,7 @@ int main(void)
                     else if (WIFSIGNALED(status))
                     {
                         int sig = WTERMSIG(status);
-                        printf("%s: %s: %d\n", cmds[0].argv[0], strsignal(sig), sig);
+                        printf("%s: %s\n", cmds[0].argv[0], strsignal(sig));
                     }
                 }
             }
@@ -234,25 +233,23 @@ int main(void)
             }
             else if (strcmp(cmds[0].argv[0], "watch") == 0)
             {
-
                 // 内置 watch 命令
                 if (cmds[0].argc < 2)
                 {
                     printf("3230yash: \"watch\" cannot be a standalone command\n");
                     printf("##3230yash >> ");
+                    fflush(stdout);
                     continue;
                 }
 
-                /* 1. 先打印表头（题目要求） */
-                printf("STATE  CPUID UTIME STIME VSIZE   MINFLT MAJFLT\n");
-
-                /* 2. fork 子进程去跑目标命令 */
+                /* 1. 子进程：原样输出到终端（不重定向 stdout） */
                 pid_t wpid = fork();
                 if (wpid == 0)
                 {
                     signal(SIGINT, SIG_DFL);
                     execvp(cmds[0].argv[1], cmds[0].argv + 1);
-                    _exit(127); /* exec 失败也不打印，留给父进程 */
+                    fprintf(stderr, "3230yash: '%s': %s\n", cmds[0].argv[1], strerror(errno));
+                    _exit(127);
                 }
                 else if (wpid < 0)
                 {
@@ -260,50 +257,77 @@ int main(void)
                     continue;
                 }
 
-                /* 3. 每 500 ms 采样 /proc/pid/stat 直到子进程结束 */
+                /* 2. 父进程：每 500 ms 读 /proc/stat → 打印表行（进行中段）*/
+                printf("STATE CPUID UTIME STIME VSIZE   MINFLT MAJFLT\n");
                 char stat_path[32];
                 snprintf(stat_path, sizeof(stat_path), "/proc/%d/stat", (int)wpid);
 
                 while (1)
                 {
-                    int status;
-                    if (waitpid(wpid, &status, WNOHANG) == wpid)
-                        break; /* 子进程已结束 */
-
+                    int st;
                     int fd = open(stat_path, O_RDONLY);
-                    if (fd < 0)
-                        break; /* 进程已消失 */
+
                     char buf[512] = {0};
                     read(fd, buf, sizeof(buf) - 1);
                     close(fd);
 
                     char state;
-                    int cpu;
-                    unsigned int utime, stime, vsize, minflt, majflt;
+                    int cpu, minflt, majflt;
+                    unsigned int utime, stime, vsize;
+                    if (sscanf(buf, "%*d %*s %c %d %*d %*d %*d %*d %*u %*u %*u %*u %*u %u %u %*d %*d %u %*u %*u %*d %*u %*u %*u %*u %*u %*u %*u %*u %*u %u %u",
+                               &state, &cpu, &utime, &stime, &vsize, &minflt, &majflt) != 7)
+                        continue; /* 解析失败，跳过 */
 
-                    sscanf(buf, "%*d %*s %c %d %*d %*d %*d %*d %*u %*u %*u %*u %*u %u %u %*d %*d %u %*u %*u %*d %*u %*u %*u %*u %*u %*u %*u %*u %*u %u %u",
-                           &state, &cpu, &utime, &stime, &vsize, &minflt, &majflt);
-
-                    /* 题目格式：STATE CPUID UTIME STIME VSIZE MINFLT MAJFLT */
-                    printf("%c %d %.2f %.2f %u %d %d\n",
+                    /* 进行中段：每 500 ms 打印一行（state 可能是 R/S/D/Z…）——与样例空行一致 */
+                    printf("%c %d %.2f %.2f %u %u %u\n",
                            state, cpu,
-                           (double)utime / 100.0, /* 滴答→秒 */
+                           (double)utime / 100.0,
                            (double)stime / 100.0,
                            vsize, minflt, majflt);
 
-                    usleep(500000); /* 500 ms */
+                    if (waitpid(wpid, &st, WNOHANG) == wpid)
+                        break; /* 子进程已结束 */
+
+                    usleep(500000); /* 500 ms 间隔 */
+
+                    if (fd < 0)
+                        break; /* 进程已消失 */
                 }
 
-                /* 4. 子进程已结束，再采一次“结束后”快照（题目要求） */
+                /* 3. 结束（僵尸）段：再读一次 stat，state=Z 就是僵尸行，必须打印 */
                 int status;
-                waitpid(wpid, &status, 0); /* 收尸 */
+                waitpid(wpid, &status, 0);
+
+                int fd = open(stat_path, O_RDONLY);
+                if (fd >= 0)
+                {
+                    char buf[512] = {0};
+                    read(fd, buf, sizeof(buf) - 1);
+                    close(fd);
+                    char state;
+                    int cpu, minflt, majflt;
+                    unsigned int utime, stime, vsize;
+                    if (sscanf(buf, "%*d %*s %c %d %*d %*d %*d %*d %*u %*u %*u %*u %*u %u %u %*d %*d %u %*u %*u %*d %*u %*u %*u %*u %*u %*u %*u %*u %*u %u %u",
+                               &state, &cpu, &utime, &stime, &vsize, &minflt, &majflt) == 7)
+                    {
+                        /* 打印最后一行（state=Z 就是僵尸）——与样例空行一致 */
+                        printf("%c %d %.2f %.2f %u\n%u %u\n",
+                               state, cpu,
+                               (double)utime / 100.0,
+                               (double)stime / 100.0,
+                               vsize, minflt, majflt);
+                    }
+                }
+
+                /* 信号名行（无论是否僵尸，都打印） */
                 if (WIFSIGNALED(status))
                 {
                     int sig = WTERMSIG(status);
-                    printf("%s:%s:%d\n", cmds[0].argv[1],
-                           sig == SIGINT ? "interrupt" : "killed", sig);
+                        printf("%s: %s\n", cmds[0].argv[1], strsignal(sig));
                 }
             }
+            //
+
             else
             {
                 // 单条正常命令，直接执行
@@ -331,7 +355,7 @@ int main(void)
                     else if (WIFSIGNALED(status))
                     {
                         int sig = WTERMSIG(status);
-                        printf("%s: %s: %d\n", cmds[0].argv[0], strsignal(sig), sig);
+                        printf("%s: %s\n", cmds[0].argv[0], strsignal(sig));
                     }
                 }
                 else
