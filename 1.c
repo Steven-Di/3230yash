@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <signal.h>
+#include <string.h>
 
 #define MAX_FIELDS 30
 #define MAX_LINE_LENGTH 1024
@@ -166,7 +167,7 @@ int main(void)
                     }
                     /* 执行命令 */
                     execvp(cmds[i].argv[0], cmds[i].argv);
-                    fprintf(stderr, "3230yash: '%s': %s\n", cmds[i].argv[0], strerror(errno));
+                    fprintf(stderr, "3230yash: Fail to execute '%s': %s\n", cmds[i].argv[0], strerror(errno));
                     exit(1);
                 }
                 else if (pid[i] < 0)
@@ -199,10 +200,8 @@ int main(void)
                 }
                 else if (WIFSIGNALED(status))
                 {
-                    const char *sig =
-                        WTERMSIG(status) == SIGINT ? "Interrupt" : WTERMSIG(status) == SIGKILL ? "Killed"
-                                                                                               : "Killed";
-                    printf("%s: %s\n", cmds[i].argv[0], sig);
+                    int sig = WTERMSIG(status);
+                    printf("%s: %s: %d\n", cmds[0].argv[0], strsignal(sig), sig);
                 }
             }
         }
@@ -255,9 +254,7 @@ int main(void)
                     else if (WIFSIGNALED(status))
                     {
                         int sig = WTERMSIG(status);
-                        printf("%s: %s\n", cmds[0].argv[0],
-                               sig == SIGINT ? "Interrupt" : sig == SIGKILL ? "Killed"
-                                                                            : "Killed");
+                        printf("%s: %s: %d\n", cmds[0].argv[0], strsignal(sig), sig);
                     }
                 }
                 else
