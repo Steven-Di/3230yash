@@ -1,7 +1,3 @@
-我来为这段代码编写一个专业的README文档。
-
----
-
 # 3230yash - 简易Shell实现
 
 ## 项目简介
@@ -127,5 +123,3 @@ typedef struct {
 - 资源泄漏防护（管道FD及时关闭）
 
 ---
-
-如需查看完整的Git提交历史，请访问：[GitHub Repository](https://github.com/Steven-Di/3230yash.git)
